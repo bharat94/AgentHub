@@ -1,600 +1,387 @@
-# AgentHub - Execution Flow and Data Flow
+# AgentHub - Execution Flow (Simplified)
 
 ## Overview
 
-This document describes how data and requests flow through the AgentHub system, from user interaction to LLM response.
+AgentHub's execution is **dead simple**:
+1. User runs command
+2. Load agent config
+3. Initialize LLM
+4. Run conversation loop
+5. Execute tools if needed
+6. Return response
+
+No complex orchestration. No registries. Just straightforward Python.
 
 ---
 
-## 1. System Startup Flow
-
-### On Application Start
+## 1. CLI Command Execution
 
 ```mermaid
-sequenceDiagram
-    participant Main
-    participant SecretsResolver
-    participant AgentRegistry
-    participant MCPRegistry
-    participant DataScopeMapper
-    participant APIServer
-
-    Main->>SecretsResolver: Load .env file
-    SecretsResolver-->>Main: Secrets loaded
-
-    Main->>DataScopeMapper: Load data scope config
-    DataScopeMapper-->>Main: Scopes mapped
-
-    Main->>AgentRegistry: Load agents/*.yml
-    AgentRegistry->>AgentRegistry: Validate configs
-    AgentRegistry->>SecretsResolver: Verify secret_refs exist
-    AgentRegistry-->>Main: Agents loaded
-
-    Main->>MCPRegistry: Load mcp/*.yml
-    MCPRegistry->>SecretsResolver: Resolve MCP secrets
-    MCPRegistry->>MCPRegistry: Initialize MCP clients
-    MCPRegistry-->>Main: MCP servers ready
-
-    Main->>APIServer: Start HTTP server
-    APIServer-->>Main: Listening on port 3000
+graph TD
+    A[User runs: agenthub chat finance 'message'] --> B[CLI parses command]
+    B --> C[Load .env secrets]
+    C --> D[Create AgentRunner]
+    D --> E[Call runner.chat]
+    E --> F[Print response]
 ```
 
-### Startup Steps
+**Code:**
+```python
+# User command
+$ agenthub chat finance "How much did I spend?"
 
-1. **Load Environment**
-   - Read `.env` file
-   - Populate SecretsResolver
+# CLI execution
+def cmd_chat(args):
+    agent_id = args[0]
+    message = " ".join(args[1:])
 
-2. **Load Data Scopes**
-   - Read `config/data_scopes.yml`
-   - Map logical names to physical datastores
-
-3. **Load Agent Configs**
-   - Scan `agents/` directory for YAML files
-   - Parse and validate each agent config
-   - Verify all `secret_ref` values exist in `.env`
-   - Build agent catalog
-
-4. **Initialize MCP Servers**
-   - Scan `mcp/` directory for YAML files
-   - Resolve MCP authentication secrets
-   - Establish connections (HTTP/stdio/SSE)
-   - Load tool catalogs from each MCP
-
-5. **Start API Server**
-   - Initialize FastAPI/Express app
-   - Set up routes
-   - Start WebSocket server for streaming
-   - Begin accepting requests
+    runner = AgentRunner(f"agents/{agent_id}.yml")
+    response = runner.chat(message)
+    print(response)
+```
 
 ---
 
-## 2. User Interaction Flow
+## 2. AgentRunner Initialization
 
-### User Selects Agent and Sends Message
+```mermaid
+graph LR
+    A[AgentRunner.__init__] --> B[Load YAML config]
+    B --> C[Create data directory]
+    C --> D[Initialize LLM client]
+    D --> E[Load tools]
+    E --> F[Load conversation history]
+    F --> G[Ready to chat]
+```
+
+**Code:**
+```python
+def __init__(self, agent_config_path: str):
+    # 1. Load config
+    self.config = yaml.safe_load(open(agent_config_path))
+
+    # 2. Create data directory
+    self.data_dir = Path(self.config['data_dir'])
+    self.data_dir.mkdir(parents=True, exist_ok=True)
+
+    # 3. Initialize LLM
+    if self.config['model']['provider'] == 'ollama':
+        self.llm = Ollama(model=self.config['model']['model'])
+    elif self.config['model']['provider'] == 'openai':
+        api_key = os.getenv(self.config['model']['api_key_env'])
+        self.llm = OpenAI(api_key=api_key, model=self.config['model']['model'])
+
+    # 4. Load tools
+    self.tools = self._load_tools()
+
+    # 5. Load history
+    self.messages = self._load_history()
+```
+
+---
+
+## 3. Conversation Loop
+
+```mermaid
+graph TD
+    A[User message] --> B[Add to history]
+    B --> C[Send to LLM with tools]
+    C --> D{Response type?}
+
+    D -->|Text| E[Save message]
+    E --> F[Return response]
+
+    D -->|Tool calls| G[Execute each tool]
+    G --> H[Add tool results to history]
+    H --> C
+```
+
+**Code:**
+```python
+def chat(self, user_message: str) -> str:
+    # Add user message
+    self.messages.append({"role": "user", "content": user_message})
+
+    # Conversation loop
+    for i in range(10):  # Max 10 iterations
+        # Call LLM
+        response = self.llm.invoke(self.messages, tools=self.tools)
+
+        # Text response = done
+        if response.content:
+            self.messages.append({"role": "assistant", "content": response.content})
+            self._save_history()
+            return response.content
+
+        # Tool calls = execute and continue
+        if response.tool_calls:
+            for tool_call in response.tool_calls:
+                result = self._execute_tool(tool_call)
+                self.messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": result
+                })
+            continue
+
+    return "Error: Max iterations reached"
+```
+
+---
+
+## 4. Tool Execution
+
+```mermaid
+graph TD
+    A[LLM requests tool] --> B{Tool type?}
+
+    B -->|Built-in| C[Execute Python function]
+    C --> D[Scoped to data_dir]
+
+    B -->|Custom Python| E[Import module]
+    E --> F[Call function]
+
+    B -->|HTTP API| G[Make HTTP request]
+    G --> H[Add auth from .env]
+
+    D --> I[Return result]
+    F --> I
+    H --> I
+```
+
+**Example: File Read Tool**
+```python
+# LLM calls: file_reader("transactions.json")
+
+def _execute_tool(self, tool_call):
+    tool_name = tool_call.name
+    tool_args = tool_call.args
+
+    if tool_name == "file_reader":
+        path = self.data_dir / tool_args["path"]
+
+        # Security: Validate path is within data_dir
+        if ".." in str(path):
+            return "Error: Invalid path"
+
+        return path.read_text()
+```
+
+---
+
+## 5. Data Isolation Enforcement
+
+```mermaid
+graph TD
+    A[Tool execution] --> B{Path validation}
+    B -->|Contains '..'| C[Reject: Path traversal attempt]
+    B -->|Absolute path| D[Reject: Must be relative]
+    B -->|Valid relative| E[Resolve path]
+    E --> F{Within data_dir?}
+    F -->|No| G[Reject: Access denied]
+    F -->|Yes| H[Execute tool]
+```
+
+**Code:**
+```python
+def read_file(self, path: str) -> str:
+    full_path = self.data_dir / path
+
+    # Prevent directory traversal
+    if ".." in str(path) or Path(path).is_absolute():
+        raise ValueError("Invalid path")
+
+    # Ensure within data_dir
+    try:
+        full_path.resolve().relative_to(self.data_dir.resolve())
+    except ValueError:
+        raise PermissionError("Access denied: path outside data_dir")
+
+    return full_path.read_text()
+```
+
+---
+
+## 6. End-to-End Example
+
+**Scenario:** User asks finance agent about spending
+
+```bash
+$ agenthub chat finance "How much did I spend on groceries?"
+```
+
+**Step-by-step execution:**
+
+```
+1. CLI parses command
+   - agent_id = "finance"
+   - message = "How much did I spend on groceries?"
+
+2. Load environment
+   - dotenv.load_dotenv()
+
+3. Create AgentRunner
+   - Load agents/finance.yml
+   - data_dir = data/finance/
+   - Initialize Ollama(model="llama3")
+   - Load tools: [calculator, file_reader, file_writer]
+   - Load history from data/finance/.history.json
+
+4. Call runner.chat(message)
+   - Add user message to history
+
+5. Send to LLM
+   Request:
+   {
+     "messages": [
+       {"role": "system", "content": "You are a finance assistant..."},
+       {"role": "user", "content": "How much did I spend on groceries?"}
+     ],
+     "tools": [calculator, file_reader, file_writer]
+   }
+
+6. LLM responds with tool call
+   Response:
+   {
+     "tool_calls": [{
+       "name": "file_reader",
+       "args": {"path": "transactions.json"}
+     }]
+   }
+
+7. Execute tool
+   - Read data/finance/transactions.json
+   - Return contents
+
+8. Add tool result to history
+   {"role": "tool", "content": "[transactions JSON]"}
+
+9. Send to LLM again
+   Request includes tool result
+
+10. LLM responds with text
+    Response:
+    {
+      "content": "You spent $450.23 on groceries last month."
+    }
+
+11. Save history and return
+    - Save to data/finance/.history.json
+    - Print response to user
+```
+
+**Total execution time:** ~2-3 seconds
+
+---
+
+## 7. Sequence Diagram
 
 ```mermaid
 sequenceDiagram
     participant User
-    participant Frontend
-    participant API
-    participant Auth
-    participant Orchestrator
-    participant AgentRegistry
-    participant SessionManager
-
-    User->>Frontend: Select "Finance Assistant"
-    Frontend->>API: GET /agents
-    API->>AgentRegistry: List agents
-    AgentRegistry-->>API: Agent metadata
-    API-->>Frontend: Available agents
-
-    User->>Frontend: Click "Start Chat"
-    Frontend->>API: POST /sessions {agent_id}
-    API->>Auth: Verify user token
-    Auth-->>API: User authenticated
-    API->>AgentRegistry: Get agent config
-    AgentRegistry-->>API: Agent config
-    API->>API: Check agent.auth.allowed_users
-    API->>SessionManager: Create session
-    SessionManager-->>API: Session created
-    API-->>Frontend: {session_id}
-
-    User->>Frontend: Type message
-    Frontend->>API: POST /sessions/{id}/messages
-    API->>Orchestrator: Process message
-    Note over Orchestrator: (See Agent Execution Flow)
-    Orchestrator-->>API: Response stream
-    API-->>Frontend: SSE/WebSocket stream
-    Frontend-->>User: Display response
-```
-
----
-
-## 3. Agent Execution Flow (Core Loop)
-
-### Full Message Processing Cycle
-
-```mermaid
-sequenceDiagram
-    participant Orchestrator
-    participant AgentRegistry
-    participant SecretsResolver
-    participant MCPRegistry
-    participant DataScopeMapper
+    participant CLI
+    participant Runner
     participant LLM
-    participant MCPServer
-    participant Database
-
-    Orchestrator->>AgentRegistry: Get agent config
-    AgentRegistry-->>Orchestrator: Agent config
-
-    Orchestrator->>SecretsResolver: Resolve model API key
-    SecretsResolver-->>Orchestrator: API key
-
-    Orchestrator->>MCPRegistry: Get MCP clients for agent
-    MCPRegistry-->>Orchestrator: MCP clients + tools
-
-    Orchestrator->>DataScopeMapper: Get data connections
-    DataScopeMapper-->>Orchestrator: DB connections
-
-    Orchestrator->>Database: Load session history
-    Database-->>Orchestrator: Previous messages
-
-    loop Conversation Loop
-        Orchestrator->>LLM: Send messages + tools
-        LLM-->>Orchestrator: Response
-
-        alt Text Response
-            Orchestrator->>Database: Save assistant message
-            Orchestrator-->>User: Stream response
-        else Tool Calls
-            loop For each tool call
-                Orchestrator->>Orchestrator: Validate data scope
-                Orchestrator->>MCPServer: Execute tool
-                MCPServer->>Database: Query data (scoped)
-                Database-->>MCPServer: Results
-                MCPServer-->>Orchestrator: Tool result
-                Orchestrator->>Orchestrator: Add tool result to messages
-            end
-            Note over Orchestrator: Continue loop with tool results
-        end
-    end
-```
-
-### Step-by-Step Breakdown
-
-#### Step 1: Initialize Agent Context
-```python
-# Load agent configuration
-agent_config = agent_registry.get(agent_id)
-
-# Verify user permissions
-if current_user not in agent_config.auth.allowed_users:
-    raise PermissionError()
-
-# Resolve LLM API key
-api_key = secrets_resolver.get(agent_config.model.secret_ref)
-```
-
-#### Step 2: Set Up Tools
-```python
-tools = []
-
-# Add built-in tools
-if 'web_search' in agent_config.tools.builtin:
-    tools.append(web_search_tool)
-
-# Add MCP tools
-for mcp_id in agent_config.tools.mcp_servers:
-    mcp_client = mcp_registry.get(mcp_id)
-    tools.extend(mcp_client.get_tools())
-```
-
-#### Step 3: Set Up Data Scopes
-```python
-data_connections = {}
-
-for scope in agent_config.data_scopes:
-    conn = data_scope_mapper.get_connection(scope)
-    data_connections[scope] = conn
-```
-
-#### Step 4: Load Conversation History
-```python
-session = session_manager.get_session(session_id)
-messages = session.get_messages(limit=50)  # Last 50 messages
-
-# Add system prompt
-messages.insert(0, {
-    "role": "system",
-    "content": agent_config.system_prompt
-})
-
-# Add new user message
-messages.append({
-    "role": "user",
-    "content": user_message
-})
-```
-
-#### Step 5: Conversation Loop
-```python
-while True:
-    # Call LLM
-    response = await llm_client.chat(
-        messages=messages,
-        tools=tools,
-        temperature=agent_config.model.temperature
-    )
-
-    # Handle text response
-    if response.type == "message":
-        # Save to database
-        session_manager.add_message(
-            session_id=session_id,
-            role="assistant",
-            content=response.content
-        )
-        # Stream to user
-        yield response.content
-        break  # Done!
-
-    # Handle tool calls
-    if response.type == "tool_calls":
-        for tool_call in response.tool_calls:
-            # Validate scope access
-            required_scope = tool_call.metadata.get("data_scope")
-            if required_scope not in agent_config.data_scopes:
-                result = {"error": "Permission denied: scope not allowed"}
-            else:
-                # Execute tool with scoped data access
-                db = data_connections[required_scope]
-                result = await tool_call.execute(db_connection=db)
-
-            # Add tool result to conversation
-            messages.append({
-                "role": "tool",
-                "tool_call_id": tool_call.id,
-                "content": json.dumps(result)
-            })
-
-        # Continue loop to get final response
-        continue
-```
-
----
-
-## 4. Tool Execution Flow
-
-### MCP Tool Call Example
-
-**Scenario**: User asks "How much did I spend on groceries last month?"
-
-```mermaid
-sequenceDiagram
-    participant LLM
-    participant Orchestrator
-    participant MCPClient
-    participant FinanceMCP
-    participant FinanceDB
-
-    LLM->>Orchestrator: Tool call: list_transactions<br/>{category: "groceries", period: "last_month"}
-
-    Orchestrator->>Orchestrator: Check if agent has "finances" scope
-    Note over Orchestrator: ✅ Agent has "finances" in data_scopes
-
-    Orchestrator->>MCPClient: Execute list_transactions
-    MCPClient->>FinanceMCP: HTTP POST /tools/list_transactions<br/>Headers: {Authorization: Bearer <token>}
-
-    FinanceMCP->>FinanceDB: SELECT * FROM transactions<br/>WHERE category = 'groceries'<br/>AND date > '2024-12-01'
-    FinanceDB-->>FinanceMCP: [transactions...]
-
-    FinanceMCP->>FinanceMCP: Calculate total
-    FinanceMCP-->>MCPClient: {total: 450.23, count: 28}
-
-    MCPClient-->>Orchestrator: Tool result
-    Orchestrator->>LLM: Add tool result to messages
-    LLM-->>Orchestrator: "You spent $450.23 on groceries..."
-```
-
-### Security Checks During Tool Execution
-
-1. **Scope Validation**
-   ```python
-   tool_scope = tool_call.metadata.get("data_scope")
-   if tool_scope not in agent_config.data_scopes:
-       return {"error": "Access denied"}
-   ```
-
-2. **Secret Injection**
-   ```python
-   # Secrets never sent to LLM
-   # Resolved only during tool execution
-   mcp_token = secrets_resolver.get(mcp_config.auth.secret_ref)
-   headers = {"Authorization": f"Bearer {mcp_token}"}
-   ```
-
-3. **Result Sanitization**
-   ```python
-   # Remove sensitive fields before sending to LLM
-   result = execute_tool(tool_call)
-   sanitized = remove_keys(result, ["ssn", "account_number"])
-   return sanitized
-   ```
-
----
-
-## 5. Data Scope Isolation Flow
-
-### How Data Scopes Work
-
-```
-Agent Config:
-  data_scopes: ["finances", "vector.finances"]
-
-Available Databases:
-  - finances.db          ← ✅ Allowed
-  - research.db          ← ❌ Blocked
-  - personal.db          ← ❌ Blocked
-  - vector.finances/     ← ✅ Allowed
-  - vector.research/     ← ❌ Blocked
-```
-
-### Enforcement at Runtime
-
-```python
-# During orchestrator initialization
-allowed_connections = {}
-for scope in agent_config.data_scopes:
-    allowed_connections[scope] = data_scope_mapper.get_connection(scope)
-
-# During tool execution
-def execute_tool(tool_call, allowed_connections):
-    required_scope = tool_call.get_required_scope()
-
-    # Block if scope not allowed
-    if required_scope not in allowed_connections:
-        raise PermissionError(f"Agent does not have access to '{required_scope}'")
-
-    # Execute with scoped connection
-    db = allowed_connections[required_scope]
-    result = tool_call.run(db)
-    return result
-```
-
----
-
-## 6. Secret Resolution Flow
-
-### How Secrets Are Resolved
-
-```mermaid
-graph TD
-    A[Agent Config] -->|model_secret_ref: OPENAI_API_KEY| B[Secrets Resolver]
-    C[MCP Config] -->|secret_ref: NOTION_TOKEN| B
-    B -->|Read .env file| D[Environment Variables]
-    D -->|OPENAI_API_KEY=sk-...| E[Actual Secret]
-    E -->|Inject only during API call| F[LLM API / MCP Server]
-    E -.Never exposed to.-> G[LLM Context]
-```
-
-### Code Example
-
-```python
-# Agent config (committed to Git)
-model:
-  secret_ref: "OPENAI_API_KEY"  # ← Reference only
-
-# .env file (gitignored)
-OPENAI_API_KEY=sk-proj-abc123...  # ← Actual secret
-
-# Runtime resolution
-class Orchestrator:
-    def initialize_llm(self, agent_config):
-        # Resolve secret at runtime
-        api_key = self.secrets.get(agent_config.model.secret_ref)
-
-        # Create LLM client with secret
-        llm_client = OpenAI(api_key=api_key)
-
-        # Secret NEVER sent to LLM in conversation
-        # Only used for authentication
-        return llm_client
-```
-
----
-
-## 7. Session and Message Flow
-
-### Database Operations
-
-```sql
--- Create new session
-INSERT INTO sessions (id, agent_id, user_id)
-VALUES ('sess_123', 'finance-assistant', 'user_456');
-
--- Add user message
-INSERT INTO messages (id, session_id, role, content)
-VALUES ('msg_1', 'sess_123', 'user', 'How much did I spend?');
-
--- Add assistant message
-INSERT INTO messages (id, session_id, role, content)
-VALUES ('msg_2', 'sess_123', 'assistant', 'You spent $450.23 on groceries last month.');
-
--- Load session history
-SELECT role, content, created_at
-FROM messages
-WHERE session_id = 'sess_123'
-ORDER BY created_at ASC
-LIMIT 50;  -- Last 50 messages for context
-```
-
-### Memory Management
-
-**Short-term memory**: Recent messages in session
-```python
-# Keep last N messages in context
-recent_messages = session.get_messages(limit=50)
-```
-
-**Long-term memory**: Vector store for RAG
-```python
-# When agent has long_term_memory enabled
-if agent_config.memory.long_term_enabled:
-    # Search vector store for relevant past conversations
-    relevant_docs = vector_store.search(
-        query=user_message,
-        collection=f"agent_{agent_id}_memory",
-        limit=5
-    )
-
-    # Add to context
-    context = "\n\n".join([doc.content for doc in relevant_docs])
-    messages.insert(1, {
-        "role": "system",
-        "content": f"Relevant past context:\n{context}"
-    })
+    participant Tool
+
+    User->>CLI: agenthub chat finance "message"
+    CLI->>Runner: AgentRunner("agents/finance.yml")
+    Runner->>Runner: Load config, init LLM, load tools
+    CLI->>Runner: chat("message")
+    Runner->>LLM: invoke(messages, tools)
+
+    LLM->>Runner: tool_call: file_reader
+    Runner->>Tool: read_file("transactions.json")
+    Tool->>Runner: [file contents]
+    Runner->>LLM: invoke(messages + tool_result)
+
+    LLM->>Runner: "You spent $450.23..."
+    Runner->>Runner: save_history()
+    Runner->>CLI: response
+    CLI->>User: Print response
 ```
 
 ---
 
 ## 8. Error Handling Flow
 
-### Common Error Scenarios
+```mermaid
+graph TD
+    A[Operation] --> B{Success?}
+    B -->|Yes| C[Continue]
+    B -->|No| D{Error type?}
 
-#### 1. Secret Not Found
-```python
-try:
-    api_key = secrets_resolver.get("MISSING_KEY")
-except KeyError:
-    return {
-        "error": "Configuration error: MISSING_KEY not found in .env",
-        "user_message": "This agent is not properly configured. Please contact support."
-    }
+    D -->|Missing .env| E[Show: Add X to .env]
+    D -->|Agent not found| F[Show: Available agents]
+    D -->|Tool error| G[Return error to LLM]
+    D -->|LLM API error| H[Retry with backoff]
+    D -->|Path traversal| I[Block and log]
+
+    E --> J[Exit]
+    F --> J
+    G --> C
+    H --> C
+    I --> J
 ```
 
-#### 2. MCP Server Unavailable
+**Error handling code:**
 ```python
+# Missing API key
 try:
-    result = await mcp_client.call_tool(tool_call)
-except ConnectionError:
-    # Fallback: inform user gracefully
-    return {
-        "error": "Service temporarily unavailable",
-        "user_message": "The finance service is currently unavailable. Please try again later."
-    }
-```
+    api_key = os.getenv(api_key_env)
+    if not api_key:
+        raise ValueError(
+            f"Missing {api_key_env} in .env file.\n"
+            f"Add it to .env: {api_key_env}=your_key_here"
+        )
+except ValueError as e:
+    print(f"Error: {e}")
+    sys.exit(1)
 
-#### 3. Data Scope Permission Denied
-```python
-if required_scope not in agent_config.data_scopes:
-    return {
-        "error": f"Agent '{agent_id}' does not have access to scope '{required_scope}'",
-        "user_message": "I don't have permission to access that data."
-    }
-```
-
-#### 4. LLM API Rate Limit
-```python
+# Tool execution error
 try:
-    response = await llm_client.chat(messages)
-except RateLimitError:
-    # Exponential backoff retry
-    await asyncio.sleep(2 ** retry_count)
-    retry_count += 1
-    # Retry up to 3 times
+    result = tool_func(**args)
+except Exception as e:
+    # Return error to LLM so it can try something else
+    result = f"Error: {str(e)}"
 ```
 
 ---
 
-## 9. Streaming Response Flow
+## 9. Performance Considerations
 
-### Server-Sent Events (SSE)
+**Cold start:**
+- Load config: <1ms
+- Initialize LLM client: <100ms
+- Load tools: <10ms
+- Load history: <10ms
+- **Total:** ~120ms
 
-```python
-@app.post("/sessions/{session_id}/messages/stream")
-async def stream_message(session_id: str, message: str):
-    async def event_generator():
-        orchestrator = Orchestrator(...)
+**Per message:**
+- LLM call: 1-3s (depends on model)
+- Tool execution: 10-500ms (depends on tool)
+- Save history: <10ms
 
-        # Stream tokens as they come from LLM
-        async for chunk in orchestrator.run_agent_streaming(session_id, message):
-            yield {
-                "event": "message",
-                "data": json.dumps({"content": chunk})
-            }
-
-        # Signal completion
-        yield {
-            "event": "done",
-            "data": json.dumps({"status": "completed"})
-        }
-
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream"
-    )
-```
-
-### WebSocket Alternative
-
-```python
-@app.websocket("/ws/sessions/{session_id}")
-async def websocket_endpoint(websocket: WebSocket, session_id: str):
-    await websocket.accept()
-
-    while True:
-        # Receive message from client
-        data = await websocket.receive_json()
-        user_message = data["message"]
-
-        # Stream response
-        async for chunk in orchestrator.run_agent_streaming(session_id, user_message):
-            await websocket.send_json({
-                "type": "chunk",
-                "content": chunk
-            })
-
-        # Send completion signal
-        await websocket.send_json({
-            "type": "done"
-        })
-```
+**Optimization opportunities (future):**
+- Cache LLM client between calls
+- Lazy load tools
+- Use streaming responses
+- Parallel tool execution
 
 ---
 
-## 10. Complete End-to-End Example
+## Summary
 
-### Scenario: User asks finance question
+| Step | Time | Can Fail? |
+|------|------|-----------|
+| Load config | <1ms | Yes (file not found) |
+| Init LLM | ~100ms | Yes (missing API key) |
+| Load tools | <10ms | Yes (invalid tool config) |
+| Load history | <10ms | No (creates if missing) |
+| LLM call | 1-3s | Yes (API error) |
+| Tool execution | 10-500ms | Yes (tool error) |
+| Save history | <10ms | No |
 
-**Request**:
-```
-User: "How much did I spend on dining out last week?"
-Agent: Finance Assistant
-Session: sess_abc123
-```
+**Total typical execution:** 1-4 seconds per message.
 
-**Execution**:
-
-1. ✅ Load agent config (`agents/finance-assistant.yml`)
-2. ✅ Check user has permission to use Finance Assistant
-3. ✅ Resolve OpenAI API key from `OPENAI_API_KEY`
-4. ✅ Initialize MCP client for `finance_mcp` with token
-5. ✅ Get data connection for `finances` scope → `finances.db`
-6. ✅ Load last 50 messages from `sess_abc123`
-7. ✅ Send to LLM with system prompt + history + new message
-8. 🔧 LLM requests tool: `list_transactions(category="dining", start_date="2025-01-04")`
-9. ✅ Validate: Finance Assistant has `finances` scope
-10. ✅ Execute tool via Finance MCP → queries `finances.db`
-11. ✅ Get results: `[{date: "2025-01-05", amount: 45.50, restaurant: "..."}]`
-12. ✅ Send tool result back to LLM
-13. ✅ LLM generates final response: "You spent $132.75 on dining out last week across 4 transactions."
-14. ✅ Save assistant message to database
-15. ✅ Stream response to user
-
-**Total time**: ~2-3 seconds
-
----
-
-This execution flow ensures security, isolation, and smooth user experience throughout the system.
+**Key principle:** Keep it simple. No complex orchestration. Just straightforward function calls.

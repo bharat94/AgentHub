@@ -1,153 +1,149 @@
-# AgentHub - Vision and Goals
+# AgentHub - Vision and Goals (Simplified)
 
 ## Vision Statement
 
-AgentHub is a **self-hosted, privacy-first AI agent orchestration platform** that enables individuals and teams to run multiple specialized AI agents with strict data isolation, secret management, and Git-safe configuration.
+AgentHub is a **simple, self-hosted tool** for running multiple AI agents with isolated data access. Each agent is a YAML config file with its own system prompt, tools, and data folder.
 
-Think of it as a **personal AI operating system** where each agent is like an app with specific permissions, tools, and data access.
+Think of it as **apps for AI** - your finance agent can't see your research notes, your work agent can't access personal data.
+
+**Start in 5 minutes. Extend in 5 lines of Python.**
 
 ## The Problem We're Solving
 
-### Current Pain Points
+**One AI assistant sees all your data.** That's risky.
 
-1. **No Data Isolation**: Existing AI assistants (ChatGPT, Claude) mix all your data in one context
-   - Your finance questions and work documents share the same conversation space
-   - No way to separate personal from professional data
-   - Risk of cross-contamination or accidental data leakage
+- You ask ChatGPT about finances, then about work projects
+- Everything mixes in one conversation history
+- No boundaries between personal, work, and sensitive data
 
-2. **Cloud Lock-In**: Most AI solutions are cloud-only
-   - Privacy concerns with sensitive data
-   - Dependence on external services
-   - No control over data storage
+**We need data isolation without complexity.**
 
-3. **Configuration Complexity**: Managing multiple AI agents is hard
-   - Secrets and API keys scattered across config files
-   - Can't safely commit configurations to Git
-   - Difficult to share or open-source your setup
+## Core Goals (MVP)
 
-4. **No Tool Isolation**: All tools available to all conversations
-   - A simple research agent shouldn't access your finance tools
-   - No way to restrict capabilities per agent
+### 1. **Dead Simple Setup**
+```bash
+git clone https://github.com/you/agenthub
+cd agenthub
+cp .env.example .env  # Add your API keys
+pip install -r requirements.txt
+./agenthub chat finance "How much did I spend?"
+```
 
-## Core Goals
+### 2. **One Config File Per Agent**
+```yaml
+# agents/finance.yml
+id: finance
+model:
+  provider: ollama
+  model: llama3
+system_prompt: "You are a finance assistant..."
+data_dir: data/finance
+tools: [calculator, file_reader]
+```
 
-### 1. Local, Self-Hosted Personal AI Agent Store
-- Run entirely on your own hardware
-- Support for both local LLMs (Ollama, LM Studio) and cloud LLMs (OpenAI, Anthropic)
-- No external dependencies for core functionality
-- Full control over your data
+### 3. **Folder-Based Data Isolation**
+```
+data/
+  finance/        ← Finance agent's sandbox
+  research/       ← Research agent's sandbox
+  personal/       ← Personal agent's sandbox
+```
+Each agent only accesses its folder. Simple as that.
 
-### 2. Each Agent is Independently Configurable
-Every agent has its own:
-- **LLM Model**: Choose OpenAI, Claude, Llama, or any other model
-- **Tools**: Built-in tools, MCP servers, or custom Python scripts
-- **Data Scopes**: Isolated access to specific databases/files
-- **Permissions**: Who can use this agent
+### 4. **Git-Safe by Default**
+- YAML configs → committed ✅
+- `.env` secrets → gitignored ✅
+- `data/` folders → gitignored ✅
 
-### 3. Isolated Private Data and Private MCP Connections
-- Finance agent only sees `finances.db`
-- Research agent only sees `research.db`
-- Work agent connects to work Notion workspace
-- Personal agent connects to personal Notion workspace
-- **Zero cross-contamination** between agent data
+### 5. **Extensible Without Complexity**
+Add a new tool:
+```python
+# tools/my_tool.py
+def my_tool(arg):
+    return "result"
+```
 
-### 4. Clean GitHub Workflow
-- Configuration files (YAML) safe to commit
-- Secrets stored in `.env` (gitignored)
-- Private data in `data/` folder (gitignored)
-- Can open-source your agent configurations without exposing secrets
-- Easy to share agent setups with team/community
-
-### 5. Clear Separation of Concerns
-- **Orchestration**: Agent selection, session management
-- **Tools**: MCP servers, built-in tools, custom scripts
-- **Data**: Isolated per-agent databases
-- **Execution**: LLM inference and tool calling
-- **Security**: Secret resolution and scope enforcement
+Register it:
+```yaml
+# agents/my-agent.yml
+tools:
+  - type: python
+    module: tools.my_tool
+    function: my_tool
+```
 
 ## Use Cases
 
-### Personal Use
-- **Finance Agent**: Access to budget tracking, investment data, private MCP for banking
-- **Research Agent**: Note-taking, web search, document analysis
-- **Personal Assistant**: Calendar, todos, personal Notion workspace
-- **Work Agent**: Work Notion, Slack, company tools
+**Finance Agent**
+```bash
+./agenthub chat finance "How much did I spend on groceries?"
+# Only has access to data/finance/ folder
+```
 
-### Team/Enterprise Use
-- Shared agent configurations (YAML files in Git)
-- Private secrets per team member (local `.env`)
-- Role-based access control
-- Audit logging for compliance
+**Research Agent**
+```bash
+./agenthub chat research "Summarize these papers"
+# Only has access to data/research/ folder
+```
 
-### Developer/Maker Use
-- Build and share agent templates
-- Open-source agent configurations
-- Community marketplace of agents
-- Plugin system for custom tools
+**Work Agent**
+```bash
+./agenthub chat work "Draft a status update"
+# Only has access to data/work/ folder
+```
+
+**Zero cross-contamination.** Each agent is isolated.
 
 ## Success Criteria
 
-### Phase 1 (MVP)
-- [ ] Can run 2+ agents with different LLM models
-- [ ] Agents have isolated data scopes
-- [ ] Secrets managed via `.env`, never committed
-- [ ] Basic web UI for agent selection and chat
-- [ ] MCP server integration working
+### MVP (Week 1)
+- [ ] CLI working: `./agenthub chat <agent> "<message>"`
+- [ ] 3 example agents: generic, finance, research
+- [ ] Folder-based data isolation working
+- [ ] Works with Ollama (local LLM)
+- [ ] Secrets in `.env`, configs in Git
 
-### Phase 2 (Polish)
-- [ ] UI for creating new agents (no manual YAML)
-- [ ] Support for 5+ different agent types
-- [ ] Vector store integration for RAG
-- [ ] Session history and memory
-- [ ] Tool call audit logging
+### Phase 2 (Week 2-3)
+- [ ] Add OpenAI/Anthropic support
+- [ ] Custom Python tool system
+- [ ] Session history (simple JSON files)
+- [ ] 10+ example agent templates
 
-### Phase 3 (Scale)
-- [ ] Multi-user support with auth
-- [ ] Agent marketplace/templates
-- [ ] Advanced memory (short-term + long-term)
-- [ ] Workspace-aware context windows
-- [ ] Organization mode with role-based access
+### Phase 3 (Month 2)
+- [ ] Optional web UI (if users ask for it)
+- [ ] Agent marketplace/sharing
+- [ ] Better tool docs
 
-## Non-Goals (For Now)
+**Ship fast. Add features when users demand them.**
 
-- Building a general-purpose AI framework (use existing libraries)
-- Competing with LangChain/LlamaIndex (we integrate with them)
-- Real-time collaboration (future extension)
-- Mobile apps (web-first)
-- Training models (inference only)
+## Non-Goals
+
+- ❌ Enterprise features (multi-user, RBAC, audit logs)
+- ❌ Complex orchestration (keep it simple)
+- ❌ Building an AI framework (use LiteLLM/LangChain)
+- ❌ Web UI first (CLI first, UI later if needed)
+- ❌ Mobile apps
 
 ## Why This Matters
 
-### For Individuals
-- Full control over your AI interactions
-- Privacy for sensitive data (finance, health, personal notes)
-- Flexibility to use any LLM (local or cloud)
-- Cost optimization (use cheap models for simple tasks)
+**For power users:**
+- Run AI locally (Ollama) for privacy
+- Separate work, personal, and sensitive data
+- Git-based workflow (configs in, secrets out)
 
-### For Teams
-- Shared agent configurations without sharing secrets
-- Git-based workflow for agent management
-- Easy onboarding (clone repo, add `.env`, done)
-- Audit trail for compliance
+**For developers:**
+- Fork and customize in Python
+- Share agent templates publicly
+- Build tools as simple Python functions
 
-### For the Community
-- Open-source friendly architecture
-- Shareable agent templates
-- Lower barrier to AI agent experimentation
-- Foundation for future innovations
-
-## Inspiration
-
-- **Claude Code**: Multi-agent architecture with specialized agents
-- **MCP (Model Context Protocol)**: Standard for AI tool integration
-- **n8n/Zapier**: Visual workflow builders (but for AI agents)
-- **Obsidian**: Local-first, extensible, community-driven
+**For teams:**
+- Share agent configs, not secrets
+- Everyone has their own `.env` file
 
 ## Principles
 
-1. **Privacy First**: Your data never leaves your machine (unless you explicitly connect to cloud services)
-2. **Git-Safe**: Configurations should be safely committable without exposing secrets
-3. **Modular**: Easy to add new agents, tools, or data sources
-4. **Open**: Open-source friendly, no vendor lock-in
-5. **Simple**: YAML configs over complex UIs (power user friendly)
-6. **Secure**: Strict isolation between agents, secrets never exposed to LLMs
+1. **Simple beats complex** - If you can't explain it in 3 sentences, simplify
+2. **CLI first, UI later** - Terminal is faster to build and debug
+3. **Local first** - Ollama before OpenAI
+4. **Files over databases** - Until you need a database
+5. **Copy-paste beats abstraction** - Until you need DRY

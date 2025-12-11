@@ -1,425 +1,420 @@
-# AgentHub - Architecture Diagrams
+# AgentHub Architecture
 
-This document provides visual representations of the AgentHub system architecture.
+## Overview
 
-## Table of Contents
-- [High-Level System Architecture](#high-level-system-architecture)
-- [Component Interaction Diagram](#component-interaction-diagram)
-- [Data Flow Diagram](#data-flow-diagram)
-- [Agent Execution Flow](#agent-execution-flow)
-- [Security Layers](#security-layers)
+AgentHub is **~500 lines of Python** that provides data-isolated AI agents.
+
+**Core idea:** Each agent gets a folder. Simple as that.
 
 ---
 
-## High-Level System Architecture
+## High-Level Design
 
-```mermaid
-graph TB
-    subgraph Client["🖥️ Client Layer"]
-        UI[Web UI<br/>React/Vue/Svelte]
-    end
+```
+User Command
+     │
+     ├─→ CLI (agenthub.py)
+     │       │
+     │       └─→ AgentRunner (runner.py)
+     │               │
+     │               ├─→ Load config (agents/*.yml)
+     │               ├─→ Init LLM (Ollama/OpenAI/Anthropic)
+     │               ├─→ Load tools (calculator, file_ops, etc.)
+     │               ├─→ Run conversation loop
+     │               └─→ Execute tools in sandbox (data/agent/)
+     │
+     └─→ Response
+```
 
-    subgraph Backend["⚙️ Backend Layer"]
-        API[API Server<br/>FastAPI/Express]
-        ORCH[Agent Orchestrator]
-        AGENTREG[Agent Registry]
-        MCPREG[MCP Registry]
-        SECRETS[Secrets Resolver]
-        DATASCOPE[Data Scope Mapper]
-    end
+**That's it.** No orchestrators, no registries, no mappers.
 
-    subgraph Storage["💾 Storage Layer"]
-        ENV[.env<br/>Secrets]
-        DB1[(finances.db)]
-        DB2[(research.db)]
-        DB3[(personal.db)]
-        SESSIONS[(sessions.db)]
-        VECTORS[Vector Stores]
-    end
+---
 
-    subgraph External["🌐 External Services"]
-        LLM1[OpenAI]
-        LLM2[Anthropic]
-        LLM3[Ollama]
-        MCP1[Finance MCP]
-        MCP2[Notion MCP]
-        MCP3[Custom MCPs]
-    end
+## Components
 
-    UI <-->|HTTP/WS| API
-    API --> ORCH
-    ORCH --> AGENTREG
-    ORCH --> MCPREG
-    ORCH --> SECRETS
-    ORCH --> DATASCOPE
+### 1. CLI (`agenthub.py` - ~50 lines)
 
-    SECRETS -.->|reads| ENV
-    DATASCOPE --> DB1
-    DATASCOPE --> DB2
-    DATASCOPE --> DB3
-    DATASCOPE --> SESSIONS
-    DATASCOPE --> VECTORS
+Simple command-line interface.
 
-    ORCH <-->|API calls| LLM1
-    ORCH <-->|API calls| LLM2
-    ORCH <-->|local| LLM3
-    ORCH <-->|tools| MCP1
-    ORCH <-->|tools| MCP2
-    ORCH <-->|tools| MCP3
+```python
+./agenthub chat finance "How much did I spend?"
+./agenthub list
+./agenthub reset finance
+```
 
-    style Client fill:#e1f5ff
-    style Backend fill:#fff4e1
-    style Storage fill:#f0f0f0
-    style External fill:#e8f5e9
+Parses command → Creates AgentRunner → Calls `runner.chat()` → Prints response.
+
+### 2. AgentRunner (`runner.py` - ~200 lines)
+
+Core logic. Does everything:
+
+1. Load agent config from YAML
+2. Initialize LLM client (Ollama/OpenAI/Anthropic)
+3. Load tools (built-in + custom)
+4. Run conversation loop
+5. Execute tool calls
+6. Manage conversation history
+
+**Key methods:**
+- `__init__(agent_config_path)` - Set up agent
+- `chat(message)` - Process message and return response
+- `reset()` - Clear conversation history
+
+### 3. Built-in Tools (`tools/*.py` - ~100 lines)
+
+Simple Python functions:
+- `calculator.py` - Safe math evaluation
+- `file_ops.py` - Read/write files (scoped to data_dir)
+- `web_search.py` - Search the web
+
+### 4. Agent Configs (`agents/*.yml`)
+
+One YAML file per agent. Everything in one place:
+
+```yaml
+id: finance
+model:
+  provider: ollama
+  model: llama3
+system_prompt: "You are a finance assistant..."
+data_dir: data/finance
+tools: [calculator, file_reader, file_writer]
+```
+
+### 5. Data Folders (`data/*`)
+
+Each agent gets a folder:
+
+```
+data/
+  finance/
+    .history.json       # Conversation history
+    transactions.json   # User data
+  research/
+    .history.json
+    notes.md
 ```
 
 ---
 
-## Component Interaction Diagram
+## Data Flow
 
-```mermaid
-sequenceDiagram
-    participant User
-    participant UI
-    participant API
-    participant Orchestrator
-    participant AgentRegistry
-    participant SecretsResolver
-    participant DataScopeMapper
-    participant LLM
-    participant MCP
+```
+1. User: "How much did I spend?"
+   ↓
+2. CLI parses command
+   ↓
+3. AgentRunner loads finance.yml
+   ↓
+4. Initialize Ollama with llama3
+   ↓
+5. Send message to LLM with tools
+   ↓
+6. LLM responds: "I need to read transactions.json"
+   ↓
+7. Execute file_reader("transactions.json")
+   - Validate: Is path within data/finance/? ✅
+   - Read: data/finance/transactions.json
+   - Return contents
+   ↓
+8. Send tool result back to LLM
+   ↓
+9. LLM responds: "You spent $450.23"
+   ↓
+10. Save to .history.json and return to user
+```
 
-    User->>UI: Select "Finance Assistant"
-    UI->>API: GET /agents
-    API->>AgentRegistry: List agents
-    AgentRegistry-->>API: Agent configs
-    API-->>UI: Available agents
+**Total time:** 1-3 seconds
 
-    User->>UI: Send message
-    UI->>API: POST /sessions/{id}/messages
-    API->>Orchestrator: Process message
+---
 
-    Orchestrator->>AgentRegistry: Get agent config
-    AgentRegistry-->>Orchestrator: finance-assistant.yml
+## Security Model
 
-    Orchestrator->>SecretsResolver: Resolve OPENAI_API_KEY
-    SecretsResolver-->>Orchestrator: sk-proj-...
+**Three rules:**
 
-    Orchestrator->>DataScopeMapper: Get finances.db connection
-    DataScopeMapper-->>Orchestrator: DB connection
+1. **Secrets in `.env`**
+   - Never in Git
+   - Loaded at runtime
+   - Never sent to LLM
 
-    Orchestrator->>LLM: Send conversation
-    LLM-->>Orchestrator: Tool call: list_transactions
+2. **Data in folders**
+   - Each agent gets `data/{agent-id}/`
+   - Tools can't access outside
 
-    Orchestrator->>MCP: Execute tool
-    MCP-->>Orchestrator: Transaction data
+3. **Path validation**
+   - No ".." (directory traversal)
+   - No absolute paths
+   - All paths relative to data_dir
 
-    Orchestrator->>LLM: Tool result
-    LLM-->>Orchestrator: Final response
+---
 
-    Orchestrator-->>API: Stream response
-    API-->>UI: SSE stream
-    UI-->>User: Display response
+## File Structure
+
+```
+AgentHub/
+├── agenthub.py              # CLI (~50 lines)
+├── runner.py                # AgentRunner (~200 lines)
+├── tools/                   # Built-in tools (~100 lines)
+│   ├── __init__.py
+│   ├── calculator.py
+│   ├── file_ops.py
+│   └── web_search.py
+├── agents/                  # Agent configs (Git ✅)
+│   ├── finance.yml
+│   ├── research.yml
+│   └── work.yml
+├── data/                    # Agent data (Git ❌)
+│   ├── finance/
+│   ├── research/
+│   └── work/
+├── .env                     # Secrets (Git ❌)
+├── .env.example             # Template (Git ✅)
+├── requirements.txt
+└── README.md
+```
+
+**Total:** ~350 lines of Python + YAML configs
+
+---
+
+## Dependencies
+
+**Core:**
+- Python 3.10+
+- LangChain (LLM abstraction)
+- PyYAML (config parsing)
+- python-dotenv (secret loading)
+
+**LLM Providers:**
+- langchain-community (Ollama)
+- langchain-openai (OpenAI)
+- langchain-anthropic (Anthropic)
+
+**That's it.** No databases, no web frameworks, no complex deps.
+
+---
+
+## Why So Simple?
+
+**We removed:**
+- ❌ Agent Registry - Just glob `agents/*.yml`
+- ❌ MCP Registry - Tools are Python functions
+- ❌ Data Scope Mapper - Just use folders
+- ❌ Secrets Resolver - Just use `os.getenv()`
+- ❌ Session Manager - Just use JSON files
+- ❌ API Server - Just use CLI (add later if needed)
+- ❌ Database - Just use JSON/text files
+- ❌ Vector stores - Add later if needed
+
+**Result:**
+- 10+ components → 3 components
+- ~5000 lines → ~500 lines
+- Weeks to MVP → Weekend to MVP
+
+---
+
+## Comparison: Old vs New
+
+| Aspect | Old Design | New Design |
+|--------|------------|------------|
+| **Components** | 10+ | 3 |
+| **Config Files** | agents/*.yml + mcp/*.yml + data_scopes.yml | agents/*.yml only |
+| **Code** | ~5000 lines | ~500 lines |
+| **Storage** | Multiple SQLite databases | JSON files + folders |
+| **Complexity** | High | Low |
+| **Time to MVP** | Weeks | Weekend |
+| **Learning Curve** | Steep | Gentle |
+
+---
+
+## Design Principles
+
+1. **Simple beats complex**
+   - If you can't explain it in 3 sentences, simplify
+
+2. **CLI first, UI later**
+   - Terminal is faster to build and debug
+   - Add web UI only if users ask
+
+3. **Local first**
+   - Ollama before OpenAI
+   - Privacy by default
+
+4. **Files over databases**
+   - JSON files until you need a database
+   - Easier to debug and backup
+
+5. **Copy-paste beats abstraction**
+   - DRY when you have 3+ copies
+   - Not before
+
+---
+
+## Extension Points
+
+**Adding a new tool:**
+```python
+# tools/my_tool.py
+def my_function(arg: str) -> str:
+    return "result"
+```
+
+```yaml
+# agents/my-agent.yml
+tools:
+  - type: python
+    module: tools.my_tool
+    functions: [my_function]
+```
+
+**Adding a new LLM provider:**
+```python
+# In runner.py, add to _init_llm()
+elif provider == 'custom':
+    from custom_llm import CustomLLM
+    return CustomLLM(...)
+```
+
+**Adding persistence:**
+```python
+# Change _load_history() and _save_history()
+# to use SQLite instead of JSON
 ```
 
 ---
 
-## Data Flow Diagram
+## What We're NOT Building (MVP)
 
-```mermaid
-flowchart TD
-    START([User Message]) --> API[API Layer]
-    API --> AUTH{Authenticated?}
-    AUTH -->|No| REJECT[Reject Request]
-    AUTH -->|Yes| LOAD[Load Agent Config]
+- ❌ Web UI (CLI first)
+- ❌ Multi-user auth (single user)
+- ❌ Real-time collaboration
+- ❌ Agent marketplace (file sharing is enough)
+- ❌ Complex orchestration
+- ❌ Vector stores (add when needed)
+- ❌ RAG (add when needed)
+- ❌ Agent-to-agent communication
 
-    LOAD --> PERM{User Allowed?}
-    PERM -->|No| REJECT
-    PERM -->|Yes| RESOLVE[Resolve Secrets]
-
-    RESOLVE --> SCOPE[Check Data Scopes]
-    SCOPE --> INITLLM[Initialize LLM Client]
-    INITLLM --> CONV[Start Conversation Loop]
-
-    CONV --> LLM[Call LLM]
-    LLM --> RESPONSE{Response Type?}
-
-    RESPONSE -->|Text| SAVE[Save Message]
-    SAVE --> STREAM[Stream to User]
-    STREAM --> END([Done])
-
-    RESPONSE -->|Tool Call| VALIDATE{Tool Scope Valid?}
-    VALIDATE -->|No| ERROR[Return Error]
-    ERROR --> CONV
-    VALIDATE -->|Yes| EXECUTE[Execute Tool]
-    EXECUTE --> RESULT[Get Result]
-    RESULT --> CONV
-
-    style START fill:#90EE90
-    style END fill:#90EE90
-    style REJECT fill:#FFB6C6
-    style ERROR fill:#FFB6C6
-```
+**Add these only when users demand them.**
 
 ---
 
-## Agent Execution Flow
+## Future Enhancements
 
-```mermaid
-stateDiagram-v2
-    [*] --> Idle
-    Idle --> LoadingConfig: User selects agent
-    LoadingConfig --> ValidatingAuth: Config loaded
-    ValidatingAuth --> Unauthorized: Auth failed
-    ValidatingAuth --> InitializingAgent: Auth success
+**When users ask for them:**
 
-    InitializingAgent --> ResolvingSecrets
-    ResolvingSecrets --> AttachingTools
-    AttachingTools --> MappingDataScopes
-    MappingDataScopes --> Ready
+1. **Web UI** (~500 lines)
+   - FastAPI backend
+   - React frontend
+   - WebSocket for streaming
 
-    Ready --> ProcessingMessage: User sends message
-    ProcessingMessage --> CallingLLM
-    CallingLLM --> ProcessingResponse
+2. **Vector stores** (~200 lines)
+   - ChromaDB integration
+   - RAG for long-term memory
 
-    ProcessingResponse --> StreamingToUser: Text response
-    ProcessingResponse --> ExecutingTools: Tool calls
+3. **Agent marketplace**
+   - Public agent templates
+   - One-click install
 
-    ExecutingTools --> ValidatingScope: Check permissions
-    ValidatingScope --> ToolDenied: Scope not allowed
-    ValidatingScope --> CallingTool: Scope allowed
-    CallingTool --> CallingLLM: Return results
+4. **Multi-user**
+   - JWT auth
+   - User-specific `.env`
 
-    ToolDenied --> CallingLLM: Return error
-    StreamingToUser --> Ready: Complete
-
-    Ready --> Idle: Session ends
-    Unauthorized --> [*]
-
-    note right of ResolvingSecrets
-        Secrets from .env
-        Never sent to LLM
-    end note
-
-    note right of ValidatingScope
-        Data scope isolation
-        enforced here
-    end note
-```
+**But not now. MVP first.**
 
 ---
 
-## Security Layers
+## Performance
 
-```mermaid
-graph TB
-    subgraph Layer1["Layer 1: Git Safety"]
-        YAML[Agent Configs<br/>YAML files]
-        MCP[MCP Configs<br/>YAML files]
-        GITIGNORE[.gitignore]
+**Typical execution:**
+- Load config: <1ms
+- Init LLM client: ~100ms
+- LLM call: 1-3s (depends on model)
+- Tool execution: 10-500ms
+- Save history: <10ms
 
-        YAML -.->|References| SECRETS
-        MCP -.->|References| SECRETS
-        GITIGNORE -.->|Excludes| SECRETS
-    end
+**Total:** 1-4 seconds per message
 
-    subgraph Layer2["Layer 2: Runtime Isolation"]
-        SECRETS[".env<br/>Secret Store"]
-        RESOLVER[Secrets Resolver]
-        ORCHESTRATOR[Orchestrator]
-
-        SECRETS --> RESOLVER
-        RESOLVER -.->|Injects at runtime| ORCHESTRATOR
-    end
-
-    subgraph Layer3["Layer 3: Data Isolation"]
-        ORCHESTRATOR --> SCOPE_CHECK{Data Scope<br/>Validation}
-        SCOPE_CHECK -->|Allowed| DB1[(finances.db)]
-        SCOPE_CHECK -->|Allowed| DB2[(research.db)]
-        SCOPE_CHECK -.->|Blocked| DB3[(personal.db)]
-    end
-
-    subgraph Layer4["Layer 4: Execution Safety"]
-        SCOPE_CHECK --> TOOL_EXEC[Tool Execution]
-        TOOL_EXEC --> PARAM_VALID{Parameter<br/>Validation}
-        PARAM_VALID -->|Valid| SAFE_EXEC[Safe Execution]
-        PARAM_VALID -.->|Invalid| REJECT[Reject]
-    end
-
-    style Layer1 fill:#e3f2fd
-    style Layer2 fill:#fff3e0
-    style Layer3 fill:#f3e5f5
-    style Layer4 fill:#e8f5e9
-    style REJECT fill:#ffcdd2
-```
+**Optimization opportunities (later):**
+- Cache LLM client
+- Lazy load tools
+- Stream responses
+- Parallel tool execution
 
 ---
 
-## Agent Isolation Architecture
+## Testing Strategy
 
-```mermaid
-graph LR
-    subgraph FinanceAgent["Finance Agent"]
-        FA_CONFIG[Config]
-        FA_MODEL[GPT-4]
-        FA_TOOLS[Finance MCP]
-        FA_DATA[(finances.db)]
-    end
+**Manual testing (MVP):**
+```bash
+# Test each agent
+./agenthub chat finance "Hello"
+./agenthub chat research "Hello"
 
-    subgraph ResearchAgent["Research Agent"]
-        RA_CONFIG[Config]
-        RA_MODEL[Claude]
-        RA_TOOLS[Web Search]
-        RA_DATA[(research.db)]
-    end
+# Test tools
+./agenthub chat finance "Calculate 2 + 2"
+./agenthub chat finance "Read transactions.json"
 
-    subgraph PersonalAgent["Personal Agent"]
-        PA_CONFIG[Config]
-        PA_MODEL[Llama 3]
-        PA_TOOLS[Notion Personal]
-        PA_DATA[(personal.db)]
-    end
-
-    subgraph WorkAgent["Work Agent"]
-        WA_CONFIG[Config]
-        WA_MODEL[GPT-4]
-        WA_TOOLS[Notion Work<br/>Slack]
-        WA_DATA[(work.db)]
-    end
-
-    ORCHESTRATOR[Agent Orchestrator] --> FinanceAgent
-    ORCHESTRATOR --> ResearchAgent
-    ORCHESTRATOR --> PersonalAgent
-    ORCHESTRATOR --> WorkAgent
-
-    FA_DATA -.X.-|Isolated| RA_DATA
-    RA_DATA -.X.-|Isolated| PA_DATA
-    PA_DATA -.X.-|Isolated| WA_DATA
-    WA_DATA -.X.-|Isolated| FA_DATA
-
-    style FinanceAgent fill:#c8e6c9
-    style ResearchAgent fill:#bbdefb
-    style PersonalAgent fill:#f8bbd0
-    style WorkAgent fill:#ffe0b2
+# Test isolation
+# Finance agent can't read research data
 ```
+
+**Automated tests (later):**
+- Unit tests for tools
+- Integration tests for AgentRunner
+- E2E tests for CLI
 
 ---
 
-## File Structure and Git Safety
+## Deployment
 
-```mermaid
-graph TD
-    ROOT[AgentHub Repository]
-
-    ROOT --> SAFE[Safe to Commit ✅]
-    ROOT --> UNSAFE[Never Commit ❌]
-
-    SAFE --> AGENTS[agents/*.yml]
-    SAFE --> MCPS[mcp/*.yml]
-    SAFE --> CONFIG[config/*.yml]
-    SAFE --> CODE[src/]
-    SAFE --> DOCS[docs/]
-
-    UNSAFE --> ENV[.env]
-    UNSAFE --> DATA[data/]
-    UNSAFE --> DBS[*.db files]
-    UNSAFE --> LOGS[logs/]
-    UNSAFE --> CACHE[cache/]
-
-    AGENTS -.->|References| ENV
-    MCPS -.->|References| ENV
-
-    style SAFE fill:#c8e6c9
-    style UNSAFE fill:#ffcdd2
-    style ROOT fill:#e3f2fd
+**Development:**
+```bash
+git clone repo
+cd agenthub
+pip install -r requirements.txt
+cp .env.example .env
+./agenthub chat finance "Hello"
 ```
 
----
+**Production:**
+Same as development! Run on your laptop, server, or Raspberry Pi.
 
-## Deployment Architecture
-
-```mermaid
-graph TB
-    subgraph Local["💻 Local Development"]
-        DEV_UI[Web UI<br/>localhost:3000]
-        DEV_API[Backend<br/>localhost:8000]
-        DEV_DB[(SQLite)]
-    end
-
-    subgraph Docker["🐳 Docker Compose"]
-        DC_NGINX[Nginx]
-        DC_BACKEND[Backend Container]
-        DC_DB[(PostgreSQL)]
-        DC_REDIS[(Redis)]
-
-        DC_NGINX --> DC_BACKEND
-        DC_BACKEND --> DC_DB
-        DC_BACKEND --> DC_REDIS
-    end
-
-    subgraph K8s["☸️ Kubernetes"]
-        INGRESS[Ingress]
-        SVC_FE[Frontend Service]
-        SVC_BE[Backend Service]
-        PODS[Backend Pods<br/>Auto-scaling]
-        PG[(PostgreSQL<br/>StatefulSet)]
-        PV[Persistent Volumes<br/>for data/]
-
-        INGRESS --> SVC_FE
-        INGRESS --> SVC_BE
-        SVC_BE --> PODS
-        PODS --> PG
-        PODS --> PV
-    end
-
-    style Local fill:#e1f5ff
-    style Docker fill:#fff4e1
-    style K8s fill:#e8f5e9
-```
-
----
-
-## Technology Stack
-
-```mermaid
-mindmap
-  root((AgentHub))
-    Frontend
-      React/Vue/Svelte
-      TailwindCSS
-      Shadcn UI
-      WebSocket
-    Backend
-      FastAPI/Express
-      Python/TypeScript
-      LangChain
-      OpenAI SDK
-    Database
-      SQLite MVP
-      PostgreSQL Scale
-      ChromaDB Vectors
-    Infrastructure
-      Docker
-      Kubernetes
-      Nginx
-      Redis
-    External
-      OpenAI
-      Anthropic
-      Ollama
-      MCP Servers
+**Optional Docker:**
+```dockerfile
+FROM python:3.10-slim
+WORKDIR /app
+COPY . .
+RUN pip install -r requirements.txt
+CMD ["python", "agenthub.py"]
 ```
 
 ---
 
 ## Summary
 
-AgentHub's architecture is designed with three core principles:
+**AgentHub in 3 sentences:**
 
-1. **🔒 Security First**: Secrets never in Git, data scope isolation, runtime-only secret resolution
-2. **🎯 Modularity**: Clean separation of concerns, easy to extend and customize
-3. **🚀 Scalability**: Start simple (SQLite), scale when needed (PostgreSQL + K8s)
+1. Each agent is a YAML config with its own data folder
+2. AgentRunner loads config, inits LLM, runs conversation loop
+3. Tools are Python functions that validate paths before execution
 
-For detailed component specifications, see [Component Specs](./plan/03-component-specs.md).
+**That's the entire architecture.**
 
-For security details, see [Security Principles](./plan/05-security-principles.md).
+---
+
+## References
+
+- **Detailed design:** See `plan/` folder
+  - [Vision and Goals](plan/01-vision-and-goals.md)
+  - [Architecture Overview](plan/02-architecture-overview.md)
+  - [Component Specs](plan/03-component-specs.md)
+  - [Execution Flow](plan/04-execution-flow.md)
+  - [Security Principles](plan/05-security-principles.md)
+
+- **Code:** Coming soon (MVP in progress)
+
+---
+
+**Philosophy: Do less, better.**
+
+Start coding → Ship MVP → Get feedback → Iterate

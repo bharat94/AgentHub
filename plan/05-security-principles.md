@@ -1,40 +1,40 @@
-# AgentHub - Security and Isolation Principles
+# AgentHub - Security Principles (Simplified)
 
-## Core Security Philosophy
+## Core Security Model
 
-AgentHub is built on the principle of **least privilege** and **defense in depth**. Each agent operates in a restricted environment with only the minimum permissions needed to function.
+**Three simple rules:**
+1. **Secrets in `.env`** - Never in Git
+2. **Data in folders** - Each agent gets its own
+3. **Path validation** - No directory traversal
+
+That's it. No complex security architecture.
 
 ---
 
-## 1. Git-Safe Architecture
+## 1. Git Safety
 
-### The Problem
-How do you build an open-source AI system where:
-- Configurations can be shared publicly
-- Secrets remain private
-- Private data never enters version control
+### Problem
+How do you share agent configs without leaking API keys?
 
-### The Solution: Three-Layer Separation
+### Solution
+Separate secrets from config.
 
+**What's committed:**
 ```
-Layer 1: Public Configuration (Safe to commit)
-├── agents/*.yml        ← Agent definitions
-├── mcp/*.yml           ← MCP server configs
-└── config/*.yml        ← System settings
-
-Layer 2: Local Secrets (Gitignored)
-└── .env                ← API keys, tokens
-
-Layer 3: Private Data (Gitignored)
-└── data/
-    ├── *.db            ← Databases
-    ├── vectors/        ← Embeddings
-    └── uploads/        ← User files
+✅ agents/*.yml          # Agent configs (no secrets)
+✅ tools/*.py            # Tool implementations
+✅ .env.example          # Template
+✅ .gitignore            # Ensures .env is ignored
 ```
 
-### Implementation
+**What's gitignored:**
+```
+❌ .env                  # API keys and tokens
+❌ data/                 # Private data
+❌ **/.history.json      # Conversation history
+```
 
-**.gitignore**:
+**.gitignore:**
 ```gitignore
 # Secrets
 .env
@@ -42,601 +42,462 @@ Layer 3: Private Data (Gitignored)
 
 # Private data
 data/
-*.db
-vectors/
 
-# Session state
-sessions/
-cache/
-
-# Logs (may contain sensitive info)
-logs/
+# Logs
 *.log
 ```
 
-**.env.example** (committed as template):
+**.env.example (template):**
 ```bash
-# LLM Provider API Keys
-OPENAI_API_KEY=sk-your-key-here
-ANTHROPIC_API_KEY=sk-ant-your-key-here
+# Copy this to .env and fill in your keys
 
-# MCP Server Tokens
-NOTION_PERSONAL_TOKEN=secret_your-token-here
-FINANCE_MCP_TOKEN=your-token-here
+# LLM Providers
+OPENAI_API_KEY=your_key_here
+ANTHROPIC_API_KEY=your_key_here
+OLLAMA_BASE_URL=http://localhost:11434
+
+# Custom APIs
+STOCKS_API_KEY=your_key_here
 ```
 
-### Best Practices
-
-1. **Never hardcode secrets**
-   ```yaml
-   # ❌ BAD
-   model:
-     api_key: sk-proj-abc123...
-
-   # ✅ GOOD
-   model:
-     secret_ref: OPENAI_API_KEY
-   ```
-
-2. **Use descriptive secret references**
-   ```yaml
-   # ❌ BAD (ambiguous)
-   secret_ref: API_KEY
-
-   # ✅ GOOD (clear purpose)
-   secret_ref: OPENAI_API_KEY_FINANCE_AGENT
-   ```
-
-3. **Document required secrets**
-   - List all secrets in `.env.example`
-   - Add comments explaining what each secret is for
-   - Include links to where to get API keys
+**Result:** You can commit your entire agent library to GitHub without exposing secrets.
 
 ---
 
-## 2. Data Scope Isolation
+## 2. Data Isolation
 
-### The Problem
-Without isolation, any agent could access all your data:
-- Finance agent could read personal journal
-- Research agent could access bank account data
-- Work agent could see personal Notion workspace
+### Problem
+How do you prevent finance agent from reading research data?
 
-### The Solution: Explicit Data Scopes
+### Solution
+Each agent gets a folder. Tools can't access outside that folder.
 
-Each agent declares which data scopes it needs:
-
-```yaml
-# agents/finance-assistant.yml
-data_scopes:
-  - finances              # Can access finances.db
-  - vector.finances       # Can search finance-related embeddings
-
-# agents/research-assistant.yml
-data_scopes:
-  - notes.research        # Can access research.db only
-  - vector.research       # Can search research embeddings
+**Directory structure:**
+```
+data/
+  finance/              # Finance agent's sandbox
+    transactions.json
+    .history.json
+  research/             # Research agent's sandbox
+    notes.md
+    .history.json
+  work/                 # Work agent's sandbox
+    projects/
+    .history.json
 ```
 
-### Enforcement
-
-**At Orchestrator Level**:
+**Enforcement:**
 ```python
-class Orchestrator:
-    def execute_tool(self, tool_call, agent_config):
-        required_scope = tool_call.metadata.get("data_scope")
+class AgentRunner:
+    def __init__(self, agent_config_path):
+        # Each agent gets its own data directory
+        self.data_dir = Path(self.config['data_dir'])
 
-        # Validate scope access
-        if required_scope not in agent_config.data_scopes:
-            raise PermissionError(
-                f"Agent '{agent_config.id}' attempted to access "
-                f"'{required_scope}' but only has access to: "
-                f"{agent_config.data_scopes}"
-            )
+        # All file operations are relative to this
+        self.data_dir.mkdir(parents=True, exist_ok=True)
 
-        # Provide scoped connection
-        db = self.data_scope_mapper.get_connection(required_scope)
-        return tool_call.execute(db)
+# File read tool
+def read_file(self, path: str) -> str:
+    full_path = self.data_dir / path
+
+    # Validate path
+    if ".." in str(path):
+        raise ValueError("Path traversal not allowed")
+
+    if path.is_absolute():
+        raise ValueError("Absolute paths not allowed")
+
+    # Ensure within data_dir
+    try:
+        full_path.resolve().relative_to(self.data_dir.resolve())
+    except ValueError:
+        raise PermissionError("Access denied")
+
+    return full_path.read_text()
 ```
 
-**At Database Level** (defense in depth):
-```python
-class DataScopeMapper:
-    def get_connection(self, scope: str):
-        # Only return connection if scope is valid
-        if scope not in self.allowed_scopes:
-            raise ValueError(f"Unknown scope: {scope}")
+**Attack scenarios and defenses:**
 
-        # Return read-only connection for sensitive scopes
-        if scope.startswith("finances"):
-            return self.get_readonly_connection(scope)
-
-        return self.get_connection(scope)
-```
-
-### Isolation Matrix
-
-| Agent | finances.db | research.db | personal.db | work.db |
-|-------|-------------|-------------|-------------|---------|
-| Finance Assistant | ✅ Read/Write | ❌ | ❌ | ❌ |
-| Research Assistant | ❌ | ✅ Read/Write | ❌ | ❌ |
-| Personal Assistant | ❌ | ❌ | ✅ Read/Write | ❌ |
-| Work Assistant | ❌ | ❌ | ❌ | ✅ Read/Write |
+| Attack | Code | Result |
+|--------|------|--------|
+| Directory traversal | `../research/notes.md` | ❌ Blocked by ".." check |
+| Absolute path | `/etc/passwd` | ❌ Blocked by absolute path check |
+| Symlink escape | `ln -s /etc data/link` | ❌ Blocked by resolve() check |
+| Valid relative | `transactions.json` | ✅ Allowed |
 
 ---
 
 ## 3. Secret Management
 
-### The Problem
-Secrets must be:
-- Available to the system at runtime
-- Never exposed to LLMs
-- Never committed to Git
-- Rotatable without code changes
+### Problem
+LLMs can't see API keys, but tools need them.
 
-### The Solution: Runtime Secret Resolution
+### Solution
+Secrets resolved at runtime, never sent to LLM.
 
-```mermaid
-graph LR
-    A[Agent Config] -->|secret_ref| B[Secrets Resolver]
-    B -->|Read .env| C[Environment Variables]
-    C -->|Return secret| D[Tool Executor]
-    D -->|Use secret| E[External API]
-    C -.Never sent to.-> F[LLM]
-```
-
-### Implementation
-
-**Secrets Resolver**:
+**Bad (❌):**
 ```python
-class SecretsResolver:
-    def __init__(self, env_file: str = ".env"):
-        load_dotenv(env_file)
-        self.secrets = dict(os.environ)
-        self._validate_required_secrets()
-
-    def get(self, secret_ref: str) -> str:
-        if secret_ref not in self.secrets:
-            raise ValueError(
-                f"Secret '{secret_ref}' not found in .env. "
-                f"Please add it to your .env file."
-            )
-        return self.secrets[secret_ref]
-
-    def _validate_required_secrets(self):
-        # On startup, check all agent configs
-        for agent in agent_registry.list():
-            if not self.has(agent.model.secret_ref):
-                logger.warning(
-                    f"Agent '{agent.id}' requires secret "
-                    f"'{agent.model.secret_ref}' which is missing"
-                )
+# Sending secret to LLM
+system_prompt = f"Use this API key: {api_key}"
+llm.chat([{"role": "system", "content": system_prompt}])
 ```
 
-**Secret Injection (Only at API Call Time)**:
+**Good (✅):**
 ```python
-# ❌ BAD: Sending secret to LLM
-messages = [
-    {"role": "system", "content": f"Use API key: {api_key}"}
-]
-
-# ✅ GOOD: Secret used only for authentication
-llm_client = OpenAI(api_key=api_key)  # Secret in HTTP header
-response = llm_client.chat(messages)  # No secret in messages
+# Secret used only for auth, not sent to LLM
+llm = OpenAI(api_key=api_key)  # In HTTP header
+response = llm.chat(messages)  # Secret not in messages
 ```
 
-### Secret Rotation
+**Implementation:**
+```python
+# Load secrets from .env
+from dotenv import load_dotenv
+load_dotenv()
 
-When rotating secrets:
-1. Update `.env` file with new secret
-2. Restart AgentHub (hot-reload in future)
-3. No code or config changes needed
+# Reference secrets by name in config
+# agents/finance.yml
+model:
+  provider: openai
+  api_key_env: OPENAI_API_KEY  # ← Name, not value
+
+# Resolve at runtime
+api_key = os.getenv(config['model']['api_key_env'])
+if not api_key:
+    raise ValueError(f"Missing {api_key_env} in .env")
+
+# Use for authentication only
+llm = OpenAI(api_key=api_key)
+```
+
+**Secrets are:**
+- ✅ Loaded from `.env`
+- ✅ Used for API authentication
+- ✅ Never sent in LLM messages
+- ✅ Never logged
+
+**Secrets are NOT:**
+- ❌ Hardcoded in configs
+- ❌ Committed to Git
+- ❌ Sent to LLM
+- ❌ Visible in error messages
 
 ---
 
-## 4. MCP Server Isolation
+## 4. Input Validation
 
-### The Problem
-Different agents need access to different external services:
-- Personal Notion workspace vs Work Notion workspace
-- Personal email vs Work email
-- Different API keys per service
+### Problem
+What if the LLM tries malicious tool calls?
 
-### The Solution: Per-Agent MCP Allowlist
+### Solution
+Validate everything.
 
-**Agent Config**:
-```yaml
-# agents/personal-assistant.yml
-tools:
-  mcp_servers:
-    - notion_personal      # Can use personal Notion
-    - gmail_personal       # Can use personal email
-
-# agents/work-assistant.yml
-tools:
-  mcp_servers:
-    - notion_work          # Can use work Notion
-    - slack_work           # Can use work Slack
-```
-
-**MCP Config**:
-```yaml
-# mcp/notion_personal.yml
-id: notion_personal
-connection:
-  url: https://notion-mcp.local
-  auth:
-    secret_ref: NOTION_PERSONAL_TOKEN
-
-# mcp/notion_work.yml
-id: notion_work
-connection:
-  url: https://notion-mcp.local
-  auth:
-    secret_ref: NOTION_WORK_TOKEN    # Different token!
-```
-
-### Enforcement
-
+**Path validation:**
 ```python
-class Orchestrator:
-    def get_tools_for_agent(self, agent_config):
-        tools = []
+def validate_path(path: str):
+    """Ensure path is safe."""
+    # No directory traversal
+    if ".." in str(path):
+        raise ValueError("Path traversal not allowed")
 
-        # Only attach MCPs that agent is allowed to use
-        for mcp_id in agent_config.tools.mcp_servers:
-            if mcp_id not in mcp_registry.list_ids():
-                logger.warning(f"MCP '{mcp_id}' not found")
-                continue
+    # Must be relative
+    if Path(path).is_absolute():
+        raise ValueError("Absolute paths not allowed")
 
-            mcp_client = mcp_registry.get(mcp_id)
-            tools.extend(mcp_client.get_tools())
+    # No null bytes
+    if "\x00" in path:
+        raise ValueError("Invalid path characters")
 
-        return tools
-```
-
-**Result**: Personal assistant can't accidentally send work messages, and vice versa.
-
----
-
-## 5. Authentication and Authorization
-
-### User Authentication
-
-**Session-based (MVP)**:
-```python
-# Simple cookie-based auth
-@app.post("/login")
-def login(username: str, password: str):
-    user = authenticate(username, password)
-    session_token = create_session(user.id)
-    response.set_cookie("session", session_token, httponly=True)
-    return {"status": "logged_in"}
-```
-
-**JWT-based (Production)**:
-```python
-@app.post("/login")
-def login(username: str, password: str):
-    user = authenticate(username, password)
-    token = jwt.encode(
-        {"user_id": user.id, "exp": datetime.utcnow() + timedelta(days=7)},
-        secret=JWT_SECRET
-    )
-    return {"token": token}
-```
-
-### Agent Authorization
-
-**Per-Agent Access Control**:
-```yaml
-# agents/finance-assistant.yml
-auth:
-  allowed_users:
-    - "user@example.com"
-    - "spouse@example.com"
-
-# agents/work-assistant.yml
-auth:
-  allowed_users:
-    - "*"  # All authenticated users
-```
-
-**Runtime Check**:
-```python
-def can_user_access_agent(user: User, agent_config: AgentConfig) -> bool:
-    allowed = agent_config.auth.allowed_users
-
-    # Wildcard: all users allowed
-    if "*" in allowed:
-        return True
-
-    # Check specific user email
-    if user.email in allowed:
-        return True
-
-    return False
-```
-
----
-
-## 6. Input Validation and Sanitization
-
-### LLM Input Validation
-
-**Prevent Prompt Injection**:
-```python
-def validate_user_input(message: str) -> str:
-    # Check message length
-    if len(message) > 10000:
-        raise ValueError("Message too long")
-
-    # Remove control characters
-    message = "".join(char for char in message if char.isprintable() or char.isspace())
-
-    # Optional: Detect prompt injection attempts
-    if is_prompt_injection(message):
-        logger.warning(f"Possible prompt injection detected: {message[:100]}")
-
-    return message
-```
-
-### Tool Parameter Validation
-
-**Schema Validation**:
-```python
-class ToolExecutor:
-    def execute(self, tool_call: ToolCall):
-        # Validate against tool schema
-        tool_schema = self.get_tool_schema(tool_call.name)
-        validate(tool_call.parameters, tool_schema)
-
-        # Sanitize file paths
-        if "path" in tool_call.parameters:
-            tool_call.parameters["path"] = sanitize_path(
-                tool_call.parameters["path"]
-            )
-
-        # Execute with validated parameters
-        return tool_call.run()
-
-def sanitize_path(path: str) -> str:
-    # Prevent directory traversal
-    path = os.path.normpath(path)
-    if path.startswith("..") or path.startswith("/"):
-        raise ValueError("Invalid path")
     return path
 ```
 
----
-
-## 7. Audit Logging
-
-### What to Log
-
-**Security Events**:
+**Tool argument validation:**
 ```python
-logger.security(
-    event="agent_access_denied",
-    user_id=user.id,
-    agent_id=agent_id,
-    reason="user not in allowed_users"
-)
+def _execute_tool(self, tool_call):
+    """Execute tool with validation."""
+    tool_name = tool_call.name
+    tool_args = tool_call.args
 
-logger.security(
-    event="data_scope_violation",
-    agent_id=agent_id,
-    attempted_scope="finances",
-    allowed_scopes=agent_config.data_scopes
-)
+    # Validate tool exists
+    if tool_name not in self.tools:
+        return f"Error: Unknown tool '{tool_name}'"
+
+    # Validate arguments
+    try:
+        # Type checking, range validation, etc.
+        validated_args = validate_tool_args(tool_name, tool_args)
+    except ValueError as e:
+        return f"Error: Invalid arguments: {e}"
+
+    # Execute with validated args
+    try:
+        result = self.tools[tool_name](**validated_args)
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+    return result
 ```
 
-**Tool Calls**:
+**Expression evaluation (calculator):**
 ```python
-logger.audit(
-    event="tool_call",
-    agent_id=agent_id,
-    tool_name=tool_call.name,
-    tool_parameters=sanitize_for_logging(tool_call.parameters),
-    result_status="success",
-    execution_time_ms=elapsed
-)
-```
+def calculate(expression: str) -> float:
+    """Safely evaluate math expressions."""
+    import ast
+    import operator
 
-**Data Access**:
-```python
-logger.audit(
-    event="data_access",
-    agent_id=agent_id,
-    data_scope="finances",
-    operation="read",
-    table="transactions",
-    row_count=25
-)
-```
+    # Only allow math operators
+    allowed_ops = {
+        ast.Add: operator.add,
+        ast.Sub: operator.sub,
+        ast.Mult: operator.mul,
+        ast.Div: operator.truediv,
+    }
 
-### Log Storage
+    def eval_node(node):
+        if isinstance(node, ast.Num):
+            return node.n
+        elif isinstance(node, ast.BinOp):
+            op = allowed_ops.get(type(node.op))
+            if not op:
+                raise ValueError("Unsupported operation")
+            return op(eval_node(node.left), eval_node(node.right))
+        else:
+            raise ValueError("Invalid expression")
 
-**Local Files** (development):
-```
-logs/
-  security.log      ← Security events
-  audit.log         ← Tool calls, data access
-  error.log         ← Errors and exceptions
-  access.log        ← HTTP requests
-```
-
-**Structured Logging** (production):
-```json
-{
-  "timestamp": "2025-01-15T10:30:00Z",
-  "level": "security",
-  "event": "data_scope_violation",
-  "agent_id": "finance-assistant",
-  "user_id": "user_123",
-  "attempted_scope": "research",
-  "allowed_scopes": ["finances"],
-  "session_id": "sess_456"
-}
+    tree = ast.parse(expression, mode='eval')
+    return eval_node(tree.body)
 ```
 
 ---
 
-## 8. Rate Limiting and Resource Control
+## 5. What We DON'T Do (MVP)
 
-### Per-User Rate Limits
+**Not worried about (yet):**
+- ❌ Multi-user authentication - single user MVP
+- ❌ Role-based access control - trust your agents
+- ❌ Audit logging - add later if needed
+- ❌ Rate limiting - not needed locally
+- ❌ Encryption at rest - OS handles this
+- ❌ Network security - running locally
 
-```python
-from slowapi import Limiter
-from slowapi.util import get_remote_address
+**Why:**
+- AgentHub runs on **your machine**
+- You control the agent configs
+- You control the tools
+- You're not exposing to internet
 
-limiter = Limiter(key_func=get_remote_address)
+**When to add:**
+- Multi-user: Add auth when you want multiple users
+- Audit logs: Add when you need compliance
+- Rate limits: Add when using cloud APIs with limits
+- Encryption: Add if storing sensitive regulated data
 
-@app.post("/sessions/{session_id}/messages")
-@limiter.limit("10/minute")  # Max 10 messages per minute
-async def send_message(session_id: str, message: str):
-    # ... handle message
+---
+
+## 6. Threat Model
+
+### What We Protect Against
+
+| Threat | Mitigation |
+|--------|------------|
+| Secrets leaked in Git | `.env` is gitignored |
+| Agent reads wrong data | Folder-based isolation + path validation |
+| Directory traversal | ".." and absolute path checks |
+| Malicious tool calls | Input validation on all args |
+| API key in logs | Never log secrets |
+| LLM sees API keys | Secrets used for auth only, not in messages |
+
+### What We DON'T Protect Against (MVP)
+
+| Threat | Why Not (Yet) |
+|--------|---------------|
+| Malicious agent configs | Trust model: you write the configs |
+| Compromised Python packages | Use virtual env, review deps |
+| Host OS compromise | Outside scope: secure your machine |
+| Network MITM | Running locally, no network exposure |
+| Side-channel attacks | Not relevant for local tool |
+
+---
+
+## 7. Security Checklist
+
+### For Users
+
+**Setup:**
+- [ ] Never commit `.env` file
+- [ ] Use `.env.example` as template
+- [ ] Use strong, unique API keys
+- [ ] Don't share your `.env` file
+
+**Usage:**
+- [ ] Review agent configs before running
+- [ ] Only add tools you trust
+- [ ] Don't run untrusted agent configs
+- [ ] Keep your data in `data/` folder
+
+**Maintenance:**
+- [ ] Rotate API keys regularly
+- [ ] Back up `.env` securely (password manager)
+- [ ] Update dependencies (`pip install -U`)
+
+### For Developers
+
+**When adding tools:**
+- [ ] Validate all inputs
+- [ ] Sanitize all outputs
+- [ ] Never log secrets
+- [ ] Use scoped file access
+- [ ] Handle errors gracefully
+
+**When adding features:**
+- [ ] Keep secrets in `.env`
+- [ ] Never send secrets to LLM
+- [ ] Validate paths before file ops
+- [ ] Use least privilege principle
+
+---
+
+## 8. Example Attacks and Defenses
+
+### Attack: Directory Traversal
+
+**Attempt:**
+```
+LLM: file_reader("../../../etc/passwd")
 ```
 
-### Per-Agent Resource Limits
-
-```yaml
-# agents/finance-assistant.yml
-limits:
-  max_tokens_per_response: 2000
-  max_tool_calls_per_message: 5
-  timeout_seconds: 30
+**Defense:**
+```python
+if ".." in path:
+    raise ValueError("Path traversal not allowed")
+# Result: ❌ Blocked
 ```
 
-**Enforcement**:
+### Attack: Absolute Path
+
+**Attempt:**
+```
+LLM: file_reader("/etc/passwd")
+```
+
+**Defense:**
 ```python
-class Orchestrator:
-    async def run_agent(self, agent_config, message):
-        tool_call_count = 0
-        start_time = time.time()
+if Path(path).is_absolute():
+    raise ValueError("Absolute paths not allowed")
+# Result: ❌ Blocked
+```
 
-        while True:
-            # Check timeout
-            if time.time() - start_time > agent_config.limits.timeout_seconds:
-                raise TimeoutError("Agent execution timed out")
+### Attack: Symlink Escape
 
-            response = await llm_client.chat(...)
+**Setup:**
+```bash
+ln -s /etc data/finance/link
+```
 
-            if response.type == "tool_calls":
-                tool_call_count += len(response.tool_calls)
+**Attempt:**
+```
+LLM: file_reader("link/passwd")
+```
 
-                # Check tool call limit
-                if tool_call_count > agent_config.limits.max_tool_calls_per_message:
-                    raise LimitExceeded("Too many tool calls")
+**Defense:**
+```python
+full_path.resolve().relative_to(self.data_dir.resolve())
+# Result: ❌ ValueError, blocked
+```
+
+### Attack: Code Injection in Calculator
+
+**Attempt:**
+```
+LLM: calculator("__import__('os').system('rm -rf /')")
+```
+
+**Defense:**
+```python
+# Only AST nodes for math operations allowed
+if not isinstance(node, (ast.Num, ast.BinOp)):
+    raise ValueError("Invalid expression")
+# Result: ❌ Blocked
 ```
 
 ---
 
 ## 9. Secure Defaults
 
-### Principle of Least Privilege
-
-**Default Agent Config** (most restrictive):
-```yaml
-data_scopes: []           # No data access by default
-tools:
-  builtin: []             # No built-in tools
-  mcp_servers: []         # No MCP servers
-auth:
-  allowed_users: []       # No users (must be explicitly added)
-```
-
-**Explicit Opt-In Required**:
-- Want web search? Must add `web_search` to `tools.builtin`
-- Want data access? Must add scope to `data_scopes`
-- Want users to access? Must add to `auth.allowed_users`
-
-### Safe Tool Defaults
+**Principle: Secure by default, opt-in to relax.**
 
 ```python
-class WebSearchTool:
-    def __init__(self):
-        # Rate limited by default
-        self.rate_limiter = RateLimiter(max_calls=10, period=60)
+# Default: No tools
+tools: []
 
-        # Result size limited
-        self.max_results = 5
-        self.max_content_length = 5000
+# Explicit: Add specific tools
+tools: [calculator, file_reader]
 
-class FileReadTool:
-    def __init__(self, data_scope: str):
-        # Read-only by default
-        self.mode = "readonly"
+# Default: No data access
+data_dir: data/empty
 
-        # Size limited
-        self.max_file_size = 10 * 1024 * 1024  # 10MB
+# Explicit: Give specific folder
+data_dir: data/finance
 
-        # Path restricted to data scope
-        self.allowed_paths = [f"data/{data_scope}/"]
+# Default: Only relative paths
+# Absolute paths rejected automatically
+
+# Default: Secrets from .env only
+# Never from configs
 ```
 
 ---
 
-## 10. Threat Model and Mitigations
+## 10. Future Security Enhancements
 
-### Threats We Protect Against
+**When you need more:**
 
-| Threat | Mitigation |
-|--------|------------|
-| Secrets leaked in Git | Secrets stored in `.env` (gitignored) |
-| Agent A accesses Agent B's data | Data scope isolation enforced by orchestrator |
-| LLM sees API keys | Secrets resolved at runtime, never sent to LLM |
-| Unauthorized user accesses agent | Auth check before agent execution |
-| Prompt injection | Input validation and sanitization |
-| Excessive API costs | Rate limiting and token limits |
-| Data exfiltration via tools | Tool parameter validation, scope checks |
-| Directory traversal | Path sanitization in file tools |
+1. **Multi-user mode:**
+   ```python
+   # Add user auth
+   auth:
+     type: jwt
+     allowed_users: ["user@example.com"]
+   ```
 
-### Threats Outside Current Scope
+2. **Audit logging:**
+   ```python
+   # Log all tool calls
+   logger.audit(f"Agent {agent_id} called {tool_name}")
+   ```
 
-| Threat | Why Out of Scope (for MVP) |
-|--------|----------------------------|
-| Malicious agent configs | Trust model: you write your own agents |
-| Compromised backend server | Host security is infrastructure concern |
-| Side-channel attacks | Requires specialized security hardening |
-| Model poisoning | Trust model: you control your LLMs |
-| DDoS attacks | Infrastructure/CDN concern |
+3. **Rate limiting:**
+   ```python
+   # Limit API calls
+   @rate_limit(max=10, per=60)
+   def chat(message):
+       ...
+   ```
 
----
+4. **Encryption at rest:**
+   ```python
+   # Encrypt sensitive data
+   data = encrypt(content, key=os.getenv("ENCRYPTION_KEY"))
+   ```
 
-## 11. Security Checklist
-
-### For Developers
-
-- [ ] Never commit `.env` files
-- [ ] Always use `secret_ref` in configs, never hardcoded secrets
-- [ ] Validate all user inputs
-- [ ] Sanitize all tool parameters
-- [ ] Log security events
-- [ ] Use parameterized SQL queries (prevent SQL injection)
-- [ ] Set appropriate CORS headers
-- [ ] Use HTTPS in production
-
-### For Users
-
-- [ ] Use strong, unique passwords
-- [ ] Rotate API keys regularly
-- [ ] Review agent configs before use
-- [ ] Monitor audit logs for suspicious activity
-- [ ] Keep AgentHub updated
-- [ ] Back up `.env` and `data/` securely
-- [ ] Don't share `.env` file with anyone
-
-### For Deployment
-
-- [ ] Enable HTTPS (Let's Encrypt or similar)
-- [ ] Set secure cookie flags (`httponly`, `secure`)
-- [ ] Configure firewall rules (only expose necessary ports)
-- [ ] Run backend as non-root user
-- [ ] Enable disk encryption for `data/` folder
-- [ ] Set up automated backups
-- [ ] Monitor for security updates
+**But for MVP: Keep it simple. Add these when users ask for them.**
 
 ---
 
-This security model provides strong isolation while remaining practical for local, self-hosted deployments.
+## Summary
+
+**Security principles (in order of importance):**
+
+1. **Secrets in `.env`** - Never in Git ✅
+2. **Folder isolation** - Each agent gets a sandbox ✅
+3. **Path validation** - No directory traversal ✅
+4. **Input validation** - Validate all tool args ✅
+5. **Secure defaults** - Opt-in to permissions ✅
+
+**Not needed (yet):**
+- ❌ Multi-user auth
+- ❌ Audit logs
+- ❌ Rate limiting
+- ❌ Encryption at rest
+
+**Philosophy:** Start simple. Add security features when users need them.
