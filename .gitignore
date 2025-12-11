@@ -1,0 +1,69 @@
+# Secrets and Environment Variables
+.env
+.env.*
+!.env.example
+
+# Private Data
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Vector Stores
+vectors/
+embeddings/
+
+# Logs
+logs/
+*.log
+
+# Session State
+sessions/
+cache/
+
+# Uploads
+uploads/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+dist/
+build/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Testing
+.coverage
+.pytest_cache/
+htmlcov/
+.tox/
+
+# Build artifacts
+*.egg-info/
+dist/
+build/
+
+# OS files
+Thumbs.db
